@@ -2,11 +2,18 @@
 Workbench API Routes.
 Handles episode and scene management for script writing.
 """
+import json
+import asyncio
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body
-from typing import List, Optional, Dict, Any
+from fastapi.responses import StreamingResponse
+from typing import List, Optional, Dict, Any, AsyncGenerator
 from core.utils import success_response, error_response
+from services.ai_service import AIService
+from services.script_converter import script_converter
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
+
+ai_service = AIService()
 
 
 @router.get("/episodes", summary="获取剧集列表")
@@ -176,3 +183,312 @@ async def upload_source(episode_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文件名不能为空")
     
     return success_response(data={"file_id": ""}, message="文件上传成功")
+
+
+@router.post("/process/dialog", summary="提取对话")
+async def process_dialog(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    提取文本中的对话内容
+    前端调用场景：步骤1 - 对话标记
+    """
+    dialogues = await ai_service.extract_dialogues(text)
+    result_text = text
+    for dialogue in dialogues:
+        result_text = result_text[:dialogue["end_pos"]] + f"|{dialogue['id']}|" + result_text[dialogue["end_pos"]:]
+    
+    return success_response(data={"text": result_text, "dialogues": dialogues})
+
+
+@router.post("/process/character", summary="提取人物")
+async def process_character(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    提取人物和描写类型
+    前端调用场景：步骤2 - 人物提取
+    """
+    result = await ai_service.extract_characters(text)
+    
+    marked_text = text
+    for desc in result["descriptions"]:
+        desc_type = {
+            "scenery": "景物描写",
+            "psychology": "心理描写",
+            "portrait": "肖像描写",
+            "action": "动作描写"
+        }.get(desc["type"], "其他描写")
+        marked_text = marked_text.replace(desc["content"], f"***{desc_type}***\n{desc['content']}\n")
+    
+    return success_response(data={"text": marked_text, "characters": result})
+
+
+@router.post("/process/plot", summary="提取主线")
+async def process_plot(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    提取故事主线
+    前端调用场景：步骤3 - 主线提取
+    """
+    plot = await ai_service.extract_main_plot(text)
+    return success_response(data={"text": text, "plot": plot})
+
+
+@router.post("/process/speaker", summary="标记对话主体")
+async def process_speaker(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    标记对话的说话主体
+    前端调用场景：步骤4 - 对话主体标记
+    """
+    characters = await ai_service.extract_characters(text)
+    all_characters = characters["main_characters"] + characters["supporting_characters"]
+    tagged = await ai_service.tag_dialogue_speakers(text, all_characters)
+    
+    result_text = text
+    for dialogue in tagged:
+        if dialogue["speaker_name"]:
+            result_text = result_text.replace(
+                f'"{dialogue["content"]}"',
+                f'***{dialogue["speaker_name"]}***："{dialogue["content"]}"'
+            )
+    
+    return success_response(data={"text": result_text, "speakers": tagged})
+
+
+@router.post("/process/scene-header", summary="生成场景头")
+async def process_scene_header(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    分析景物描写生成场景头
+    前端调用场景：步骤6 - 场景头生成
+    """
+    characters = await ai_service.extract_characters(text)
+    scenery_descriptions = [d for d in characters["descriptions"] if d["type"] == "scenery"]
+    
+    result_text = text
+    scene_number = 1
+    for desc in scenery_descriptions[:3]:
+        scene_info = await ai_service.analyze_scene(desc["content"], scene_number)
+        location_type = "INT." if scene_info["is_interior"] else "EXT."
+        scene_header = f"{location_type} {scene_info['location']} - {scene_info['time_of_day']}"
+        result_text = result_text.replace(desc["content"], f"{scene_header}\n{desc['content']}")
+        scene_number += 1
+    
+    return success_response(data={"text": result_text})
+
+
+@router.post("/process/psychology", summary="转换心理描写")
+async def process_psychology(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    将心理描写转换为动作或神态描写
+    前端调用场景：步骤7 - 心理转换
+    """
+    characters = await ai_service.extract_characters(text)
+    all_characters = characters["main_characters"] + characters["supporting_characters"]
+    
+    result_text = text
+    for desc in characters["descriptions"]:
+        if desc["type"] == "psychology":
+            char_name = all_characters[0]["name"] if all_characters else "未知人物"
+            converted = await ai_service.convert_psychology(desc["content"], char_name)
+            result_text = result_text.replace(desc["content"], converted)
+    
+    return success_response(data={"text": result_text})
+
+
+@router.post("/process/cleanup", summary="去除无用语句")
+async def process_cleanup(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    去除无用语句
+    前端调用场景：步骤10 - 无用语句去除
+    """
+    useless_lines = await ai_service.detect_useless_lines(text)
+    lines = text.split('\n')
+    cleaned_lines = [line for i, line in enumerate(lines) if (i + 1) not in useless_lines]
+    result_text = '\n'.join(cleaned_lines)
+    
+    return success_response(data={"text": result_text, "removed_lines": useless_lines})
+
+
+@router.post("/process/polish", summary="润色剧本")
+async def process_polish(text: str = Body(..., embed=True, description="待处理文本")):
+    """
+    润色剧本文本
+    前端调用场景：步骤11 - AI润色
+    """
+    polished = await ai_service.polish_script(text)
+    return success_response(data={"text": polished})
+
+
+@router.post("/process/all", summary="AI 5步小说转剧本")
+async def process_all(
+    text: str = Body(..., embed=True, description="待处理文本"),
+    script_type: str = Body("long", embed=True, description="剧本类型：long/short"),
+    title: str = Body("未命名剧本", embed=True, description="剧本标题"),
+):
+    """
+    AI 驱动的小说转剧本 5 步流程：
+    Step 1+2: 拆解原文 + 场景拆分 → analysis
+    Step 3-5: 台词转化 + 镜头适配 + 规范化 → script_text
+    YAML: 结构化输出
+    """
+    try:
+        # Step 1+2: AI 分析拆解 + 场景拆分
+        analysis = await ai_service.analyze_novel(text, title)
+
+        # Step 3-5: AI 剧本转化（核心）
+        script_text = await ai_service.convert_to_script(text, script_type)
+
+        # YAML 结构化
+        yaml_output = await ai_service.generate_yaml_ai(script_text, title)
+
+        return success_response(data={
+            "analysis": analysis,
+            "text": script_text,
+            "yaml": yaml_output,
+            "script_type": script_type,
+        })
+    except Exception as e:
+        # 回退到本地规则转换器
+        try:
+            result = script_converter.convert(text, title)
+            return success_response(data={
+                "analysis": "",
+                "text": result["script_text"],
+                "yaml": result["yaml"],
+                "script_type": script_type,
+                "fallback": True,
+            })
+        except:
+            return error_response(message=f"处理失败: {str(e)}")
+
+
+@router.post("/process/all/stream", summary="AI 5步小说转剧本（流式）")
+async def process_all_stream(
+    text: str = Body(..., embed=True, description="待处理文本"),
+    script_type: str = Body("long", embed=True, description="剧本类型：long/short"),
+    title: str = Body("未命名剧本", embed=True, description="剧本标题"),
+):
+    """
+    AI 驱动的小说转剧本 5 步流程（流式输出版本）：
+    通过 Server-Sent Events (SSE) 逐步推送分析结果和剧本内容。
+    
+    SSE 事件类型：
+    - phase: 当前阶段提示 ("analysis" / "script" / "yaml" / "done")
+    - token: 剧本内容的增量文本（仅 script 阶段）
+    - result: 阶段性完整结果
+    - error: 错误信息
+    """
+    async def event_stream() -> AsyncGenerator[str, None]:
+        try:
+            # Phase 1: AI 分析拆解
+            yield f"data: {json.dumps({'type': 'phase', 'phase': 'analysis', 'message': '正在分析人物与场景...'})}\n\n"
+            
+            analysis = await ai_service.analyze_novel(text, title)
+            yield f"data: {json.dumps({'type': 'result', 'phase': 'analysis', 'analysis': analysis})}\n\n"
+
+            # Phase 2: 剧本转化（流式）
+            yield f"data: {json.dumps({'type': 'phase', 'phase': 'script', 'message': '正在生成剧本...'})}\n\n"
+            
+            script_buffer = ""
+            async for token in ai_service.convert_to_script_stream(text, script_type):
+                script_buffer += token
+                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'result', 'phase': 'script', 'text': script_buffer})}\n\n"
+
+            # Phase 3: YAML 结构化
+            yield f"data: {json.dumps({'type': 'phase', 'phase': 'yaml', 'message': '正在生成 YAML 结构...'})}\n\n"
+            
+            yaml_output = await ai_service.generate_yaml_ai(script_buffer, title)
+            yield f"data: {json.dumps({'type': 'result', 'phase': 'yaml', 'yaml': yaml_output})}\n\n"
+
+            # 完成
+            yield f"data: {json.dumps({'type': 'phase', 'phase': 'done'})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            # 回退到本地规则转换器
+            try:
+                result = script_converter.convert(text, title)
+                fallback_text = result["script_text"]
+                # 模拟流式输出
+                chunk_size = 50
+                for i in range(0, len(fallback_text), chunk_size):
+                    chunk = fallback_text[i:i + chunk_size]
+                    yield f"data: {json.dumps({'type': 'token', 'token': chunk})}\n\n"
+                    await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'type': 'result', 'phase': 'script', 'text': fallback_text, 'fallback': True})}\n\n"
+                yield f"data: {json.dumps({'type': 'result', 'phase': 'yaml', 'yaml': result['yaml'], 'fallback': True})}\n\n"
+                yield f"data: {json.dumps({'type': 'phase', 'phase': 'done', 'fallback': True})}\n\n"
+            except Exception as fallback_error:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'回退也失败: {str(fallback_error)}'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@router.post("/process/convert", summary="直接转换（纯本地规则）")
+async def process_convert(
+    text: str = Body(..., embed=True, description="待处理小说文本"),
+    title: str = Body("未命名剧本", embed=True, description="剧本标题"),
+):
+    """
+    纯本地规则转换，不依赖 AI。
+    快速将小说文本转换为剧本格式。
+    返回: { script_text, scenes, yaml }
+    """
+    try:
+        result = script_converter.convert(text, title)
+        return success_response(data={
+            "text": result["script_text"],
+            "scenes": result["scenes"],
+            "yaml": result["yaml"],
+        })
+    except Exception as e:
+        return error_response(message=f"转换失败: {str(e)}")
+
+
+@router.post("/process/chapters", summary="逐章处理")
+async def process_chapters(
+    chapters: List[Dict[str, Any]] = Body(..., embed=True, description="章节列表(含content)"),
+    title: str = Body("未命名剧本", embed=True, description="剧本标题"),
+):
+    """
+    逐章处理小说文本，每章独立调用AI分析
+    返回每章的分析结果
+    """
+    try:
+        results = await ai_service.process_chapters(chapters)
+        
+        # 汇总所有章节文本
+        all_texts = [ch.get("content", "") for ch in chapters]
+        combined_text = "\n\n###\n\n".join(all_texts)
+        
+        # 生成 YAML
+        yaml_output = await ai_service.generate_yaml(combined_text, title)
+        
+        return success_response(data={
+            "chapters": results,
+            "combined_text": combined_text,
+            "yaml": yaml_output,
+        })
+    except Exception as e:
+        return error_response(message=f"逐章处理失败: {str(e)}")
+
+
+@router.post("/process/generate-yaml", summary="生成YAML剧本")
+async def generate_yaml(
+    text: str = Body(..., embed=True, description="处理后的文本"),
+    title: str = Body("未命名剧本", embed=True, description="剧本标题"),
+):
+    """
+    将处理后的文本转换为YAML格式的结构化剧本
+    """
+    try:
+        yaml_output = await ai_service.generate_yaml(text, title)
+        return success_response(data={"yaml": yaml_output})
+    except Exception as e:
+        return error_response(message=f"YAML生成失败: {str(e)}")

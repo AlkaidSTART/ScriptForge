@@ -27,16 +27,9 @@ import { useTaskStore } from "@/store/useTaskStore";
 import { useToastStore } from "@/store/useToastStore";
 import { useNovelStore } from "@/store/useNovelStore";
 import mammoth from "mammoth";
+import { detectChapters, type ChapterPreview } from "@/lib/chapterUtils";
 
 type ImportStep = "upload" | "preview" | "configure" | "confirm" | "converting";
-
-interface ChapterPreview {
-  index: number;
-  title: string;
-  wordCount: number;
-  startPos?: number;
-  endPos?: number;
-}
 
 export default function ImportPage() {
   const navigate = useNavigate();
@@ -149,149 +142,6 @@ export default function ImportPage() {
 
     return () => window.clearInterval(interval);
   }, [setTasks, step]);
-
-  const detectChapters = (text: string): ChapterPreview[] => {
-    const lines = text.split("\n");
-
-    // 更全面的章节检测正则表达式，支持多种语言和格式
-    const chapterPatterns = [
-      // 中文格式 - 支持更多变体
-      /^第[一二三四五六七八九十百千零\d]+[章节部回卷集]/,
-      /^第\s*[一二三四五六七八九十百千零\d]+\s*[章节部回卷集]/,
-      /^[一二三四五六七八九十百千零\d]+[章节部回卷集]/,  // 不带"第"字的格式
-      /^第[一二三四五六七八九十百千零\d]+[\s\-_][章节部回卷集]?/,  // 带分隔符的格式
-      /^卷[一二三四五六七八九十百千零\d]+/,  // "卷一"格式
-      /^[卷部篇][一二三四五六七八九十百千零\d]+/,  // "卷一"、"部一"格式
-      // 带标题的格式
-      /^第[一二三四五六七八九十百千零\d]+[章节部回卷集]\s+.*/,
-      /^[一二三四五六七八九十百千零\d]+[章节部回卷集]\s+.*/,
-      // 日文格式
-      /^[一二三四五六七八九十百千零\d]+[章節部回巻集]/,
-      // 英文格式
-      /^Chapter\s+\d+/i,
-      /^Part\s+\d+/i,
-      /^Volume\s+\d+/i,
-      /^VOLUME\s+\d+/i,
-      /^Book\s+\d+/i,
-      /^Episode\s+\d+/i,
-      /^Ep\.\s*\d+/i,
-      /^Act\s+\d+/i,
-      /^Section\s+\d+/i,
-      // 简写格式
-      /^[Cc]h\.\s*\d+/,
-      /^[Vv]ol\.\s*\d+/,
-      // 数字开头的格式
-      /^\d+\s*[章节部回卷集]/,
-      /^\d+[.\s-][章节部回卷集]?/,
-    ];
-
-    // 需要过滤的关键词
-    const filterKeywords = [
-      '插图', '插图页', 'color', 'COLOR', 'illustration', 'Illustration',
-      'postscript', 'Postscript', '后记', '序', '序章', '前言',
-      '目录', 'contents', 'Contents', 'CONTENTS',
-      '作者简介', '作者紹介', 'about the author'
-    ];
-
-    const detected: ChapterPreview[] = [];
-    let currentChapter: ChapterPreview | null = null;
-    let currentCharPos = 0; // 记录当前字符位置
-
-    lines.forEach((line) => {
-      const trimmed = line.trim();
-      const lineStartPos = currentCharPos;
-      const lineEndPos = lineStartPos + line.length + 1; // +1 是换行符
-
-      // 检查是否匹配任何章节模式
-      const matchesPattern = chapterPatterns.some((pattern) => pattern.test(trimmed));
-
-      // 额外的验证规则
-      const isValidChapter = matchesPattern &&
-        // 检查是否包含过滤关键词
-        !filterKeywords.some(keyword => trimmed.includes(keyword)) &&
-        // 检查是否包含特殊引号（如 『第一章』这种情况）
-        !/[『「【（『“”""]/.test(trimmed) &&
-        // 检查长度
-        trimmed.length <= 100 &&
-        // 检查是否为纯章节标题格式（避免误匹配普通文本）
-        (
-          // 明确有章节关键词的情况
-          /第[一二三四五六七八九十百千零\d]+[章节部回卷集]/.test(trimmed) ||
-          /[卷部篇][一二三四五六七八九十百千零\d]+/.test(trimmed) ||
-          /Chapter\s+\d+/i.test(trimmed) ||
-          /Volume\s+\d+/i.test(trimmed)
-        );
-
-      if (isValidChapter) {
-        // 保存前一个章节的结束位置
-        if (currentChapter) {
-          currentChapter.endPos = lineStartPos;
-        }
-
-        // 开始新章节
-        currentChapter = {
-          index: detected.length + 1,
-          title: trimmed.slice(0, 80),
-          wordCount: 0,
-          startPos: lineStartPos,
-        };
-        detected.push(currentChapter);
-      } else if (currentChapter) {
-        // 累加当前章节的字数
-        currentChapter.wordCount += trimmed.length;
-      }
-
-      currentCharPos = lineEndPos;
-    });
-
-    // 设置最后一个章节的结束位置
-    if (currentChapter) {
-      (currentChapter as ChapterPreview).endPos = text.length;
-    }
-
-    // 如果检测到的章节不足3个且文本较长，尝试其他方式
-    if (detected.length < 3 && text.trim().length > 1000) {
-      // 基于换行段落来智能分段
-      const paragraphs = text
-        .split(/\n\n+/)
-        .filter((p) => p.trim().length > 100); // 只保留超过100字的段落
-
-      if (paragraphs.length >= 3) {
-        // 将长段落分成3个虚拟章节
-        const chapterSize = Math.ceil(paragraphs.length / 3);
-        const newChapters: ChapterPreview[] = [];
-        let currentPos = 0;
-
-        for (let i = 0; i < 3; i++) {
-          const start = i * chapterSize;
-          const end = Math.min(start + chapterSize, paragraphs.length);
-          const chapterParagraphs = paragraphs.slice(start, end);
-
-          if (chapterParagraphs.length > 0) {
-            const chapterText = chapterParagraphs.join("\n\n");
-            const chapterStartPos = text.indexOf(chapterText, currentPos);
-            const chapterEndPos = chapterStartPos + chapterText.length;
-            currentPos = chapterEndPos;
-
-            newChapters.push({
-              index: i + 1,
-              title: `第 ${i + 1} 部分（约 ${chapterParagraphs.length} 段）`,
-              wordCount: chapterText.length,
-              startPos: chapterStartPos,
-              endPos: chapterEndPos,
-            });
-          }
-        }
-
-        // 如果成功创建了章节，替换检测到的章节
-        if (newChapters.length >= 3) {
-          return newChapters;
-        }
-      }
-    }
-
-    return detected;
-  };
 
   // 调试函数：分析文本中可能的章节标题
   const analyzeChapterPatterns = (text: string): string[] => {
@@ -422,10 +272,9 @@ export default function ImportPage() {
         ch.startPos !== undefined && ch.endPos !== undefined
           ? pasteContent.slice(ch.startPos, ch.endPos)
           : (() => {
-              // 如果没有位置信息，尝试从文本中提取
-              const lines = pasteContent.split('\n');
-              return lines.slice((ch.index - 1) * 100, ch.index * 100).join('\n') || ch.title;
-            })();
+            const lines = pasteContent.split('\n');
+            return lines.slice((ch.index - 1) * 100, ch.index * 100).join('\n') || ch.title;
+          })();
 
       return {
         index: idx + 1,
@@ -438,76 +287,86 @@ export default function ImportPage() {
 
     const selectedContent = chaptersWithContent.map(ch => ch.content).join('\n\n');
 
-    // 创建项目
-    const backendProject = await createProject({
-      title: `新项目 (${selectedChapters.size}章)`,
-      source_novel: "导入文本",
-      source_author: "未知作者",
-      chapter_count: selectedChapters.size,
-    });
-    const projectId = backendProject.id;
-    const project = {
-      id: backendProject.id,
-      title: backendProject.title,
-      sourceNovel: backendProject.source_novel,
-      sourceAuthor: backendProject.source_author,
-      chapterCount: backendProject.chapter_count,
-      status: backendProject.status === "failed" || backendProject.status === "distributing"
-        ? "idle"
-        : backendProject.status,
-      createdAt: backendProject.created_at,
-    };
-    addProject(project);
-    setCurrentProject(projectId);
+    // 根据章节名生成项目标题
+    const firstChapter = filteredSelectedChapterList[0];
+    let projectTitle = `新项目 (${selectedChapters.size}章)`;
+    if (firstChapter && firstChapter.title) {
+      const chapterTitle = firstChapter.title.replace(/[第卷章回部]/g, "").trim();
+      if (chapterTitle && chapterTitle.length > 0) {
+        projectTitle = chapterTitle.length > 20
+          ? chapterTitle.substring(0, 20) + "..."
+          : chapterTitle;
+      }
+    }
 
-    // 创建小说数据
-    const novelId = `novel_${Date.now().toString(36)}`;
-    const novelData = {
-      id: novelId,
-      projectId,
-      title: project.title,
-      author: "未知作者",
-      totalChapters: selectedChapters.size,
-      totalWordCount: selectedContent.length,
-      chapters: chaptersWithContent,
-      fullText: selectedContent,
-      createdAt: new Date().toISOString(),
-    };
-    addNovel(novelData);
-    setCurrentNovel(novelId);
+    try {
+      // 创建项目
+      const backendProject = await createProject({
+        title: `新项目 (${selectedChapters.size}章)`,
+        source_novel: "导入文本",
+        source_author: "未知作者",
+        chapter_count: selectedChapters.size,
+      });
+      const projectId = backendProject.id;
+      const project = {
+        id: backendProject.id,
+        title: backendProject.title,
+        sourceNovel: backendProject.source_novel,
+        sourceAuthor: backendProject.source_author,
+        chapterCount: backendProject.chapter_count,
+        status: backendProject.status === "failed" || backendProject.status === "distributing"
+          ? "idle"
+          : backendProject.status,
+        createdAt: backendProject.created_at,
+      };
+      addProject(project);
+      setCurrentProject(projectId);
 
-    // 创建基础剧本数据（不需要AI处理）
-    const scriptId = `script_${Date.now().toString(36)}`;
-    const initialScriptData = {
-      id: scriptId,
-      projectId,
-      title: project.title,
-      sourceText: selectedContent,
-      episodes: [
-        {
-          id: `${scriptId}_episode_1`,
-          title: project.title,
-          coldOpen: "等待 AI 分析",
-          scenes: [
-            {
-              id: `${scriptId}_scene_1`,
-              code: "SC-001",
-              title: "等待处理",
-              location: "等待分析",
-              intent: "导入的原始文本尚未处理，请启动 AI 转换",
-              beats: [],
-              status: "draft" as const,
-            },
-          ],
-        },
-      ],
-    };
-    upsertScript(initialScriptData);
-    setCurrentScript(scriptId);
+      // 创建小说数据
+      const novelId = `novel_${Date.now().toString(36)}`;
+      const novelData = {
+        id: novelId,
+        projectId,
+        title: projectTitle,
+        author: "未知作者",
+        totalChapters: selectedChapters.size,
+        totalWordCount: selectedContent.length,
+        chapters: chaptersWithContent,
+        fullText: selectedContent,
+        createdAt: new Date().toISOString(),
+      };
+      addNovel(novelData);
+      setCurrentNovel(novelId);
 
-    // 跳转到工作台
-    navigate("/workbench");
-    addToast({ type: "success", title: "已进入工作台" });
+      // 创建基础剧本数据（不需要AI处理）
+      const scriptId = `script_${Date.now().toString(36)}`;
+      const initialScriptData = {
+        id: scriptId,
+        projectId,
+        title: projectTitle,
+        sourceText: selectedContent,
+        episodes: [
+          {
+            id: `${scriptId}_episode_1`,
+            title: projectTitle,
+            coldOpen: "",
+            scenes: [],
+          },
+        ],
+      };
+      upsertScript(initialScriptData);
+      setCurrentScript(scriptId);
+
+      // 跳转到工作台
+      navigate("/workbench");
+      addToast({ type: "success", title: "已进入工作台" });
+    } catch (err) {
+      addToast({
+        type: "error",
+        title: "创建项目失败",
+        message: err instanceof Error ? err.message : "无法连接到服务器，请确认后端已启动",
+      });
+    }
   };
 
   const handleStartConvert = async () => {
@@ -525,220 +384,230 @@ export default function ImportPage() {
     setStep("converting");
     setConvertProgress(0);
 
-    const backendProject = await createProject({
-      title: `新项目 (${selectedChapters.size}章)`,
-      source_novel: "导入文本",
-      source_author: "未知作者",
-      chapter_count: selectedChapters.size,
-    });
-    const projectId = backendProject.id;
-    const novelId = `novel_${Date.now().toString(36)}`;
-    const project = {
-      id: backendProject.id,
-      title: backendProject.title,
-      sourceNovel: backendProject.source_novel,
-      sourceAuthor: backendProject.source_author,
-      chapterCount: backendProject.chapter_count,
-      status: "converting" as const,
-      createdAt: backendProject.created_at,
-    };
-    addProject(project);
-    setCurrentProject(projectId);
-
-    // 提取选中的章节内容
-    const filteredSelectedChapterList = chapters.filter(ch => selectedChapters.has(ch.index));
-    setSelectedChapterList(filteredSelectedChapterList); // 保存到状态
-    // 只提取选中章节的内容
-    const selectedContent = filteredSelectedChapterList
-      .map(ch => {
-        if (ch.startPos !== undefined && ch.endPos !== undefined) {
-          return pasteContent.slice(ch.startPos, ch.endPos);
-        }
-        return ch.title + '\n'; // 回退方案
-      })
-      .join('\n\n');
-
-    const novelData = {
-      id: novelId,
-      projectId,
-      title: project.title,
-      author: "未知作者",
-      totalChapters: selectedChapters.size,
-      totalWordCount: selectedContent.length,
-      chapters: filteredSelectedChapterList.map((ch, idx) => ({
-        index: idx + 1,
-        title: ch.title,
-        wordCount: ch.wordCount,
-        originalIndex: ch.index,
-      })),
-      fullText: selectedContent,
-      createdAt: new Date().toISOString(),
-    };
-    addNovel(novelData);
-    setCurrentNovel(novelId);
-
     try {
-      setStepMessages(["正在创建剧本..."]);
-      setCurrentStep("创建剧本");
-
-      console.log("Step 1: Creating script...");
-      const script = await createScript({
-        title: project.title,
-        type: adaptType === "short" ? "short_film" : "feature_film",
-        text: selectedContent.trim(),
-        project_id: projectId,
+      const backendProject = await createProject({
+        title: `新项目 (${selectedChapters.size}章)`,
+        source_novel: "导入文本",
+        source_author: "未知作者",
+        chapter_count: selectedChapters.size,
       });
-      console.log("Script created:", script);
-      setStepMessages(prev => [...prev, "✅ 剧本创建完成"]);
-
-      // 立即保存基础剧本数据到 store，即使任务还在处理中
-      const initialScriptData = mapBackendScriptToWorkbench(script, projectId);
-      upsertScript(initialScriptData);
-      setCurrentScript(script.id);
-
-      setCurrentStep("启动处理任务");
-      setStepMessages(prev => [...prev, "正在启动处理任务..."]);
-
-      console.log("Step 2: Starting script processing...");
-      const processingTask = await startScriptProcessing(script.id, projectId);
-      console.log("Processing task:", processingTask);
-      setStepMessages(prev => [...prev, "✅ 处理任务启动成功"]);
-
-      setCurrentStep("获取任务状态");
-      setStepMessages(prev => [...prev, "正在获取任务状态..."]);
-
-      console.log("Step 3: Fetching live task...");
-      const liveTask = await fetchTask(processingTask.id);
-      console.log("Live task:", liveTask);
-      setStepMessages(prev => [...prev, "✅ 任务状态获取成功"]);
-
-      updateProject(projectId, {
-        scriptId: script.id,
-        taskId: liveTask.id,
-      });
-
-      addTask(liveTask);
-      upsertScript(mapBackendScriptToWorkbench(script, projectId));
-      setCurrentScript(script.id);
-      setConvertProgress(Math.max(10, liveTask.progress));
-
-      const stepNames: Record<string, string> = {
-        dialogue_extraction: "步骤1: 提取对话",
-        character_extraction: "步骤2: 提取人物和描写",
-        main_plot_extraction: "步骤3: 提取主线",
-        dialogue_speaker_tagging: "步骤4: 标记对话主体",
-        scene_analysis: "步骤6: 分析场景头",
-        psychology_conversion: "步骤7: 转换心理描写",
-        scene_packaging: "步骤8: 打包场景",
-        useless_line_detection: "步骤9: 检测无用语句",
-        useless_line_removal: "步骤10: 移除无用语句",
-        polishing: "步骤11: 润色处理",
-        export: "步骤12: 导出剧本",
+      const projectId = backendProject.id;
+      const novelId = `novel_${Date.now().toString(36)}`;
+      const project = {
+        id: backendProject.id,
+        title: backendProject.title,
+        sourceNovel: backendProject.source_novel,
+        sourceAuthor: backendProject.source_author,
+        chapterCount: backendProject.chapter_count,
+        status: "converting" as const,
+        createdAt: backendProject.created_at,
       };
+      addProject(project);
+      setCurrentProject(projectId);
 
-      const completionPoll = window.setInterval(async () => {
-        try {
-          console.log("Polling task:", liveTask.id);
-          const latestTask = await fetchTask(liveTask.id);
-          console.log("Latest task:", latestTask);
-
-          updateTask(latestTask.id, latestTask);
-
-          // 检查进度是否有变化
-          const previousProgress = convertProgress;
-          setConvertProgress(latestTask.progress);
-
-          if (latestTask.progress > previousProgress) {
-            setLastProgressUpdate(Date.now());
+      // 提取选中的章节内容
+      const filteredSelectedChapterList = chapters.filter(ch => selectedChapters.has(ch.index));
+      setSelectedChapterList(filteredSelectedChapterList); // 保存到状态
+      // 只提取选中章节的内容
+      const selectedContent = filteredSelectedChapterList
+        .map(ch => {
+          if (ch.startPos !== undefined && ch.endPos !== undefined) {
+            return pasteContent.slice(ch.startPos, ch.endPos);
           }
+          return ch.title + '\n'; // 回退方案
+        })
+        .join('\n\n');
 
-          // 检查是否长时间无响应（超过2分钟）
+      const novelData = {
+        id: novelId,
+        projectId,
+        title: project.title,
+        author: "未知作者",
+        totalChapters: selectedChapters.size,
+        totalWordCount: selectedContent.length,
+        chapters: filteredSelectedChapterList.map((ch, idx) => ({
+          index: idx + 1,
+          title: ch.title,
+          wordCount: ch.wordCount,
+          originalIndex: ch.index,
+        })),
+        fullText: selectedContent,
+        createdAt: new Date().toISOString(),
+      };
+      addNovel(novelData);
+      setCurrentNovel(novelId);
+
+      try {
+        setStepMessages(["正在创建剧本..."]);
+        setCurrentStep("创建剧本");
+
+        console.log("Step 1: Creating script...");
+        const script = await createScript({
+          title: project.title,
+          type: adaptType === "short" ? "short_film" : "feature_film",
+          text: selectedContent.trim(),
+          project_id: projectId,
+        });
+        console.log("Script created:", script);
+        setStepMessages(prev => [...prev, "✅ 剧本创建完成"]);
+
+        // 立即保存基础剧本数据到 store，即使任务还在处理中
+        const initialScriptData = mapBackendScriptToWorkbench(script, projectId);
+        upsertScript(initialScriptData);
+        setCurrentScript(script.id);
+
+        setCurrentStep("启动处理任务");
+        setStepMessages(prev => [...prev, "正在启动处理任务..."]);
+
+        console.log("Step 2: Starting script processing...");
+        const processingTask = await startScriptProcessing(script.id, projectId);
+        console.log("Processing task:", processingTask);
+        setStepMessages(prev => [...prev, "✅ 处理任务启动成功"]);
+
+        setCurrentStep("获取任务状态");
+        setStepMessages(prev => [...prev, "正在获取任务状态..."]);
+
+        console.log("Step 3: Fetching live task...");
+        const liveTask = await fetchTask(processingTask.id);
+        console.log("Live task:", liveTask);
+        setStepMessages(prev => [...prev, "✅ 任务状态获取成功"]);
+
+        updateProject(projectId, {
+          scriptId: script.id,
+          taskId: liveTask.id,
+        });
+
+        addTask(liveTask);
+        upsertScript(mapBackendScriptToWorkbench(script, projectId));
+        setCurrentScript(script.id);
+        setConvertProgress(Math.max(10, liveTask.progress));
+
+        const stepNames: Record<string, string> = {
+          dialogue_extraction: "步骤1: 提取对话",
+          character_extraction: "步骤2: 提取人物和描写",
+          main_plot_extraction: "步骤3: 提取主线",
+          dialogue_speaker_tagging: "步骤4: 标记对话主体",
+          scene_analysis: "步骤6: 分析场景头",
+          psychology_conversion: "步骤7: 转换心理描写",
+          scene_packaging: "步骤8: 打包场景",
+          useless_line_detection: "步骤9: 检测无用语句",
+          useless_line_removal: "步骤10: 移除无用语句",
+          polishing: "步骤11: 润色处理",
+          export: "步骤12: 导出剧本",
+        };
+
+        const completionPoll = window.setInterval(async () => {
+          try {
+            console.log("Polling task:", liveTask.id);
+            const latestTask = await fetchTask(liveTask.id);
+            console.log("Latest task:", latestTask);
+
+            updateTask(latestTask.id, latestTask);
+
+            // 检查进度是否有变化
+            const previousProgress = convertProgress;
+            setConvertProgress(latestTask.progress);
+
+            if (latestTask.progress > previousProgress) {
+              setLastProgressUpdate(Date.now());
+            }
+
+            // 检查是否长时间无响应（超过2分钟）
+            const now = Date.now();
+            if (now - lastProgressUpdate > 120000) {
+              // 显示警告但不跳转
+              if (!stepMessages.includes("⚠️ 检测到长时间无响应，正在尝试重新连接...")) {
+                setStepMessages(prev => [...prev, "⚠️ 检测到长时间无响应，正在尝试重新连接..."]);
+              }
+            }
+
+            // 更新当前步骤
+            if (latestTask.current_step && stepNames[latestTask.current_step]) {
+              const stepName = stepNames[latestTask.current_step];
+              if (currentStep !== stepName) {
+                setCurrentStep(stepName);
+                setStepMessages(prev => [...prev, `🔄 ${stepName}...`]);
+              }
+            }
+
+            if (latestTask.status === "done") {
+              window.clearInterval(heartbeatInterval);
+              setCurrentStep("完成");
+              setStepMessages(prev => [...prev, "🎉 剧本转换完成！"]);
+              const scriptDetail = await fetchScript(script.id);
+              upsertScript(mapBackendScriptToWorkbench(scriptDetail, projectId));
+              updateProject(projectId, { status: "ready" });
+              setCurrentScript(script.id);
+              window.clearInterval(completionPoll);
+              setTimeout(() => {
+                addToast({ type: "success", title: "剧本转换完成" });
+                navigate("/workbench");
+              }, 1000);
+            } else if (latestTask.status === "failed") {
+              window.clearInterval(heartbeatInterval);
+              setCurrentStep("失败");
+              setStepMessages(prev => [...prev, `❌ 转换失败: ${latestTask.error_message ?? "未知错误"}`]);
+              updateProject(projectId, { status: "idle" });
+              window.clearInterval(completionPoll);
+              setTimeout(() => {
+                addToast({
+                  type: "error",
+                  title: "转换失败",
+                  message: latestTask.error_message ?? "后端处理失败",
+                });
+              }, 500);
+            }
+          } catch (error) {
+            console.error("Polling error:", error);
+            // 超时或网络错误时不自动跳转，只显示错误信息
+            if (error instanceof Error && error.name === "AbortError") {
+              setStepMessages(prev => [...prev, "⚠️ 请求超时，正在重试..."]);
+              // 继续轮询，不要停止
+            } else {
+              setCurrentStep("轮询失败");
+              setStepMessages(prev => [...prev, `❌ 轮询失败: ${error instanceof Error ? error.message : "未知错误"}`]);
+              // 不要自动停止轮询，保持重试
+            }
+          }
+        }, 2000);
+
+        // 添加模拟进度更新机制，防止进度长时间不动
+        const heartbeatInterval = window.setInterval(() => {
           const now = Date.now();
-          if (now - lastProgressUpdate > 120000) {
-            // 显示警告但不跳转
-            if (!stepMessages.includes("⚠️ 检测到长时间无响应，正在尝试重新连接...")) {
-              setStepMessages(prev => [...prev, "⚠️ 检测到长时间无响应，正在尝试重新连接..."]);
-            }
+          const timeSinceLastUpdate = now - lastProgressUpdate;
+
+          // 如果超过5秒没有进度更新，添加心跳消息
+          if (timeSinceLastUpdate > 5000 && convertProgress < 100) {
+            setStepMessages(prev => {
+              const lastMsg = prev[prev.length - 1];
+              if (!lastMsg?.includes("处理中")) {
+                return [...prev, "⏳ AI正在处理中..."];
+              }
+              return prev;
+            });
           }
+        }, 8000);
 
-          // 更新当前步骤
-          if (latestTask.current_step && stepNames[latestTask.current_step]) {
-            const stepName = stepNames[latestTask.current_step];
-            if (currentStep !== stepName) {
-              setCurrentStep(stepName);
-              setStepMessages(prev => [...prev, `🔄 ${stepName}...`]);
-            }
-          }
-
-          if (latestTask.status === "done") {
-            window.clearInterval(heartbeatInterval);
-            setCurrentStep("完成");
-            setStepMessages(prev => [...prev, "🎉 剧本转换完成！"]);
-            const scriptDetail = await fetchScript(script.id);
-            upsertScript(mapBackendScriptToWorkbench(scriptDetail, projectId));
-            updateProject(projectId, { status: "ready" });
-            setCurrentScript(script.id);
-            window.clearInterval(completionPoll);
-            setTimeout(() => {
-              addToast({ type: "success", title: "剧本转换完成" });
-              navigate("/workbench");
-            }, 1000);
-          } else if (latestTask.status === "failed") {
-            window.clearInterval(heartbeatInterval);
-            setCurrentStep("失败");
-            setStepMessages(prev => [...prev, `❌ 转换失败: ${latestTask.error_message ?? "未知错误"}`]);
-            updateProject(projectId, { status: "idle" });
-            window.clearInterval(completionPoll);
-            setTimeout(() => {
-              addToast({
-                type: "error",
-                title: "转换失败",
-                message: latestTask.error_message ?? "后端处理失败",
-              });
-            }, 500);
-          }
-        } catch (error) {
-          console.error("Polling error:", error);
-          // 超时或网络错误时不自动跳转，只显示错误信息
-          if (error instanceof Error && error.name === "AbortError") {
-            setStepMessages(prev => [...prev, "⚠️ 请求超时，正在重试..."]);
-            // 继续轮询，不要停止
-          } else {
-            setCurrentStep("轮询失败");
-            setStepMessages(prev => [...prev, `❌ 轮询失败: ${error instanceof Error ? error.message : "未知错误"}`]);
-            // 不要自动停止轮询，保持重试
-          }
-        }
-      }, 2000);
-
-      // 添加模拟进度更新机制，防止进度长时间不动
-      const heartbeatInterval = window.setInterval(() => {
-        const now = Date.now();
-        const timeSinceLastUpdate = now - lastProgressUpdate;
-
-        // 如果超过5秒没有进度更新，添加心跳消息
-        if (timeSinceLastUpdate > 5000 && convertProgress < 100) {
-          setStepMessages(prev => {
-            const lastMsg = prev[prev.length - 1];
-            if (!lastMsg?.includes("处理中")) {
-              return [...prev, "⏳ AI正在处理中..."];
-            }
-            return prev;
-          });
-        }
-      }, 8000);
-
-    } catch (error) {
-      // 只有在创建脚本或启动任务阶段失败才跳转回配置页
-      // 轮询过程中的错误由轮询内部处理
-      console.error("Initial setup error:", error);
+      } catch (error) {
+        // 只有在创建脚本或启动任务阶段失败才跳转回配置页
+        // 轮询过程中的错误由轮询内部处理
+        console.error("Initial setup error:", error);
+        addToast({
+          type: "error",
+          title: "提交失败",
+          message: error instanceof Error ? error.message : "无法连接后端服务",
+        });
+      } finally {
+        setIsSubmitting(false);
+      }
+    } catch (err) {
       addToast({
         type: "error",
-        title: "提交失败",
-        message: error instanceof Error ? error.message : "无法连接后端服务",
+        title: "创建项目失败",
+        message: err instanceof Error ? err.message : "无法连接到服务器，请确认后端已启动",
       });
-    } finally {
       setIsSubmitting(false);
+      setStep("configure");
     }
   };
 
@@ -1312,9 +1181,11 @@ export default function ImportPage() {
                         msg.includes("失败") ? "bg-red-100 text-red-600" :
                           "bg-(--accent-light) text-(--accent-soft)"
                         }`}>
-                        {msg.includes("完成") ? <Check className="h-3 w-3" /> :
-                          msg.includes("失败") ? <AlertCircle className="h-3 w-3" /> :
-                            <span className="text-xs">{idx + 1}</span>}
+                        <span className="inline-flex items-center justify-center">
+                          {msg.includes("完成") ? <Check className="h-3 w-3" /> :
+                            msg.includes("失败") ? <AlertCircle className="h-3 w-3" /> :
+                              <span className="text-xs">{idx + 1}</span>}
+                        </span>
                       </div>
                       <span className={msg.includes("失败") ? "text-red-500" : "text-foreground"}>
                         {msg}
@@ -1379,7 +1250,9 @@ export default function ImportPage() {
                     >
                       <div className={`flex h-4 w-4 items-center justify-center rounded-full ${done ? "bg-green-500" : "bg-(--line-soft)"
                         }`}>
-                        {done ? <Check className="h-2.5 w-2.5 text-white" /> : null}
+                        <span className="inline-flex">
+                          {done ? <Check className="h-2.5 w-2.5 text-white" /> : null}
+                        </span>
                       </div>
                       <span className="truncate">{ch.title}</span>
                     </div>
